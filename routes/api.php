@@ -4,6 +4,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\LayananController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\ReservasiController;
+// use App\Http\Controllers\Api\BookingController;
 
 /*
 |--------------------------------------------------------------------------
@@ -25,3 +27,5 @@ Route::post('/register', [AuthController::class,'register']);
 
 Route::get('/layanan', [LayananController::class, 'index']);
 
+Route::get('/slots/{tanggal}', [ReservasiController::class, 'slots']);
+Route::post('/reservasi', [ReservasiController::class, 'store']);
