@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\LayananController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ReservasiController;
+use App\Http\Controllers\Api\PaymentSettingController;
 
 /*
 |--------------------------------------------------------------------------
@@ -55,3 +56,13 @@ Route::apiResource('layanan', LayananController::class);
 // Route::post('/layanan', [LayananController::class, 'store']);
 // Route::put('/layanan/{id}', [LayananController::class, 'update']);
 // Route::delete('/layanan/{id}', [LayananController::class, 'destroy']);
+
+// Payment settings (diletakkan di dalam group middleware auth:sanctum untuk admin)
+Route::middleware('auth:sanctum')->group(function () {
+    // ... other admin routes ...
+    Route::get('/payment-settings', [PaymentSettingController::class, 'index']);
+    Route::post('/payment-settings', [PaymentSettingController::class, 'update']);
+});
+
+// Public (untuk booking page)
+Route::get('/payment-settings/public', [PaymentSettingController::class, 'index']);
