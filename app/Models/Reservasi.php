@@ -13,6 +13,7 @@ class Reservasi extends Model
     protected $primaryKey = 'id_reservasi';
 
     protected $fillable = [
+        'kode_reservasi',
         'pelanggan_id',
         'cabang_id',
         'layanan_id',

@@ -62,6 +62,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // ... other admin routes ...
     Route::get('/payment-settings', [PaymentSettingController::class, 'index']);
     Route::post('/payment-settings', [PaymentSettingController::class, 'update']);
+    Route::get('/admin/revenue-monthly', [ReservasiController::class, 'monthlyRevenue']);
 });
 
 // Public (untuk booking page)

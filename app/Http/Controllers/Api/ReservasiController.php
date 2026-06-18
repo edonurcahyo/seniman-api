@@ -29,13 +29,16 @@ class ReservasiController extends Controller
         }
 
         $reservations = DB::table('reservasi as r')
+            ->join('pelanggan as p', 'r.pelanggan_id', '=', 'p.id_pelanggan')
             ->join('layanan as l', 'r.layanan_id', '=', 'l.id_layanan')
             ->leftJoin('slot_waktu as sw', 'r.slot_id', '=', 'sw.id_slot')
             ->leftJoin('cabang as c', 'r.cabang_id', '=', 'c.id_cabang')
             ->where('r.pelanggan_id', $pelangganId)
             ->select(
                 'r.id_reservasi',
+                'r.kode_reservasi',
                 'r.pelanggan_id',
+                'p.nama as pelanggan_nama',
                 'r.cabang_id',
                 'r.layanan_id',
                 'r.slot_id',
@@ -43,7 +46,8 @@ class ReservasiController extends Controller
                 'r.total_harga',
                 'r.status',
                 'r.metode_pembayaran',  
-                'r.catatan',          
+                'r.catatan',
+                'r.bukti_pembayaran',          
                 'r.created_at',
                 'l.nama_layanan',
                 'l.durasi',
@@ -60,6 +64,7 @@ class ReservasiController extends Controller
                 'id_reservasi' => $item->id_reservasi,
                 'kode_reservasi' => 'RES-' . str_pad($item->id_reservasi, 6, '0', STR_PAD_LEFT),
                 'pelanggan_id' => $item->pelanggan_id,
+                'pelanggan_nama' => $item->pelanggan_nama ?? 'Customer',
                 'cabang_id' => $item->cabang_id,
                 'nama_cabang' => $item->nama_cabang ?? 'Seniman Barbershop',
                 'cabang_alamat' => $item->cabang_alamat ?? '',
@@ -67,6 +72,7 @@ class ReservasiController extends Controller
                 'nama_layanan' => $item->nama_layanan,
                 'durasi' => $item->durasi . ' menit',
                 'total_harga' => (float) $item->total_harga,
+                'bukti_pembayaran' => $item->bukti_pembayaran,
                 'tanggal' => $item->tanggal_reservasi,
                 'waktu' => $item->jam_mulai ? substr($item->jam_mulai, 0, 5) : '10:00',
                 'status' => $this->mapStatus($item->status),
@@ -174,17 +180,29 @@ class ReservasiController extends Controller
         return response()->json($slots);
     }
 
-
-    public function dashboardStats()
+    public function dashboardStats(Request $request)
     {
-        $totalReservations = DB::table('reservasi')->count();
-        $todayReservations = DB::table('reservasi')->whereDate('tanggal_reservasi', now())->count();
+        $cabangId = $request->input('cabang_id');
+        
+        $query = DB::table('reservasi');
+        if ($cabangId) {
+            $query->where('cabang_id', $cabangId);
+        }
+        
+        $totalReservations = $query->count();
+        $todayReservations = (clone $query)->whereDate('tanggal_reservasi', now())->count();
         $totalCustomers = DB::table('pelanggan')->count();
-        $monthlyRevenue = DB::table('reservasi')
+        
+        $revenueQuery = DB::table('reservasi')
             ->whereMonth('tanggal_reservasi', now()->month)
             ->whereYear('tanggal_reservasi', now()->year)
-            ->where('status', 'dikonfirmasi')
-            ->sum('total_harga');
+            ->whereIn('status', ['dikonfirmasi', 'selesai']);
+        
+        if ($cabangId) {
+            $revenueQuery->where('cabang_id', $cabangId);
+        }
+        
+        $monthlyRevenue = $revenueQuery->sum('total_harga');
         
         return response()->json([
             'totalReservations' => $totalReservations,
@@ -195,9 +213,162 @@ class ReservasiController extends Controller
         ]);
     }
 
-    public function allReservations()
+    public function monthlyRevenue(Request $request)
     {
-        $reservations = DB::table('reservasi as r')
+        $cabangId = $request->input('cabang_id');
+        $months = 6; // 6 bulan terakhir
+        
+        $result = [];
+        $monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Ags', 'Sep', 'Okt', 'Nov', 'Des'];
+        
+        for ($i = $months - 1; $i >= 0; $i--) {
+            $date = now()->subMonths($i);
+            $month = $date->month;
+            $year = $date->year;
+            $monthName = $monthNames[$month - 1];
+            
+            $query = DB::table('reservasi')
+                ->whereMonth('tanggal_reservasi', $month)
+                ->whereYear('tanggal_reservasi', $year)
+                ->whereIn('status', ['dikonfirmasi', 'selesai']);
+            
+            if ($cabangId) {
+                $query->where('cabang_id', $cabangId);
+            }
+            
+            $revenue = $query->sum('total_harga') ?? 0;
+            
+            $result[] = [
+                'month' => $monthName,
+                'revenue' => (float) $revenue,
+                'month_index' => $month,
+                'year' => $year
+            ];
+        }
+        
+        return response()->json([
+            'success' => true,
+            'data' => $result
+        ]);
+    }
+
+    /**
+     * Upload bukti pembayaran
+     */
+    public function uploadBukti(Request $request)
+    {
+        $request->validate([
+            'bukti_pembayaran' => 'required|image|mimes:jpeg,png,jpg,webp|max:5120'
+        ]);
+
+        try {
+            $file = $request->file('bukti_pembayaran');
+            $path = $file->store('bukti_pembayaran', 'public');
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Bukti pembayaran berhasil diupload',
+                'bukti_url' => $path,
+                'data' => [
+                    'bukti_url' => $path
+                ]
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal upload bukti: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Konfirmasi pembayaran
+     */
+    public function confirmPayment(Request $request, $id)
+    {
+        $request->validate([
+            'bukti_pembayaran' => 'nullable|string'
+        ]);
+
+        $reservasi = DB::table('reservasi')
+            ->where('id_reservasi', $id)
+            ->first();
+
+        if (!$reservasi) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Reservasi tidak ditemukan'
+            ], 404);
+        }
+
+        // Update status dan bukti pembayaran
+        $updateData = [
+            'status' => 'dikonfirmasi',
+            'updated_at' => now()
+        ];
+
+        if ($request->has('bukti_pembayaran')) {
+            $updateData['bukti_pembayaran'] = $request->bukti_pembayaran;
+        }
+
+        DB::table('reservasi')
+            ->where('id_reservasi', $id)
+            ->update($updateData);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Pembayaran berhasil dikonfirmasi',
+            'data' => [
+                'id_reservasi' => $id,
+                'status' => 'dikonfirmasi',
+                'bukti_pembayaran' => $request->bukti_pembayaran
+            ]
+        ]);
+    }
+
+    /**
+     * Batalkan reservasi
+     */
+    public function cancel($id)
+    {
+        $reservasi = DB::table('reservasi')
+            ->where('id_reservasi', $id)
+            ->first();
+
+        if (!$reservasi) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Reservasi tidak ditemukan'
+            ], 404);
+        }
+
+        DB::table('reservasi')
+            ->where('id_reservasi', $id)
+            ->update([
+                'status' => 'dibatalkan',
+                'updated_at' => now()
+            ]);
+
+        // Kembalikan slot ke tersedia
+        if ($reservasi->slot_id) {
+            DB::table('slot_waktu')
+                ->where('id_slot', $reservasi->slot_id)
+                ->update(['status' => 'tersedia']);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Reservasi berhasil dibatalkan'
+        ]);
+    }
+
+    // app/Http/Controllers/Api/ReservasiController.php
+
+    public function allReservations(Request $request)
+    {
+        $cabangId = $request->input('cabang_id');
+        
+        $query = DB::table('reservasi as r')
             ->leftJoin('pelanggan as p', 'r.pelanggan_id', '=', 'p.id_pelanggan')
             ->leftJoin('layanan as l', 'r.layanan_id', '=', 'l.id_layanan')
             ->leftJoin('cabang as c', 'r.cabang_id', '=', 'c.id_cabang')
@@ -216,20 +387,25 @@ class ReservasiController extends Controller
                 'r.total_harga',
                 'r.status',
                 'r.metode_pembayaran',
+                'r.bukti_pembayaran',
                 'r.created_at'
-            )
-            ->orderBy('r.created_at', 'desc')
-            ->get();
+            );
         
-        // Add waktu from jam_mulai
+        // 🔥 FILTER BERDASARKAN CABANG
+        if ($cabangId) {
+            $query->where('r.cabang_id', $cabangId);
+        }
+        
+        $reservations = $query->orderBy('r.created_at', 'desc')->get();
+        
         foreach ($reservations as $r) {
             if ($r->waktu) {
                 $r->waktu = substr($r->waktu, 0, 5);
             }
         }
         
-        return response()->json(['data' => $reservations]);
-    }
+    return response()->json(['data' => $reservations]);
+}
 
     public function allCustomers()
     {
