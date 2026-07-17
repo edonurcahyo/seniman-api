@@ -136,46 +136,98 @@ class ReservasiController extends Controller
 
     public function slots($tanggal)
     {
-        // 🔥 Cari jadwal berdasarkan tanggal
+        $today = now()->format('Y-m-d');
+        $currentTime = now()->format('H:i:s');
+        $isToday = $tanggal === $today;
+        
+        // Cari jadwal berdasarkan tanggal
         $jadwal = DB::table('jadwal')
             ->where('tanggal', $tanggal)
             ->first();
 
-        // 🔥 Jika jadwal tidak ditemukan, buat jadwal baru untuk tanggal tersebut
+        // Jika jadwal tidak ditemukan, buat jadwal baru untuk tanggal tersebut
         if (!$jadwal) {
-            // Buat jadwal baru
             $jadwalId = DB::table('jadwal')->insertGetId([
                 'tanggal' => $tanggal,
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
             
-            // Buat slot waktu untuk jadwal baru (default 10:00 - 22:00)
             $jamMulai = 10;
             $jamSelesai = 22;
+            $menitPerSlot = 45;
             
-            for ($jam = $jamMulai; $jam <= $jamSelesai; $jam++) {
+            $mulaiMenit = $jamMulai * 60;
+            $selesaiMenit = $jamSelesai * 60;
+            $currentMenit = $mulaiMenit;
+            
+            while ($currentMenit + $menitPerSlot <= $selesaiMenit) {
+                $jamMulaiSlot = floor($currentMenit / 60);
+                $menitMulaiSlot = $currentMenit % 60;
+                $jamSelesaiSlot = floor(($currentMenit + $menitPerSlot) / 60);
+                $menitSelesaiSlot = ($currentMenit + $menitPerSlot) % 60;
+                
+                $jamMulaiStr = sprintf('%02d:%02d:00', $jamMulaiSlot, $menitMulaiSlot);
+                
+                // 🔥 CEK APAKAH SLOT SUDAH LEWAT (UNTUK HARI INI)
+                $status = 'tersedia';
+                if ($isToday && $jamMulaiStr <= $currentTime) {
+                    $status = 'lewat';
+                }
+                
                 DB::table('slot_waktu')->insert([
                     'jadwal_id' => $jadwalId,
-                    'jam_mulai' => sprintf('%02d:00:00', $jam),
-                    'jam_selesai' => sprintf('%02d:00:00', $jam + 1),
-                    'status' => 'tersedia',
+                    'jam_mulai' => $jamMulaiStr,
+                    'jam_selesai' => sprintf('%02d:%02d:00', $jamSelesaiSlot, $menitSelesaiSlot),
+                    'status' => $status,
                     'created_at' => now(),
                     'updated_at' => now()
                 ]);
+                
+                $currentMenit += $menitPerSlot;
             }
             
             $slots = DB::table('slot_waktu')
                 ->where('jadwal_id', $jadwalId)
                 ->get();
                 
+            // 🔥 HAPUS FILTER - KIRIM SEMUA SLOT TERMASUK YANG LEWAT
+            // if ($isToday) {
+            //     $slots = $slots->filter(function($slot) use ($currentTime) {
+            //         return $slot->jam_mulai > $currentTime;
+            //     })->values();
+            // }
+                
             return response()->json($slots);
         }
 
-        // 🔥 Ambil slot berdasarkan jadwal_id
+        // Ambil slot berdasarkan jadwal_id
         $slots = DB::table('slot_waktu')
             ->where('jadwal_id', $jadwal->id_jadwal)
             ->get();
+
+        // 🔥 UPDATE STATUS SLOT YANG SUDAH LEWAT DI DATABASE (UNTUK HARI INI)
+        if ($isToday) {
+            foreach ($slots as $slot) {
+                if ($slot->jam_mulai <= $currentTime && $slot->status === 'tersedia') {
+                    DB::table('slot_waktu')
+                        ->where('id_slot', $slot->id_slot)
+                        ->update(['status' => 'lewat']);
+                }
+            }
+            
+            // 🔥 AMBIL ULANG DATA SETELAH UPDATE
+            $slots = DB::table('slot_waktu')
+                ->where('jadwal_id', $jadwal->id_jadwal)
+                ->get();
+        }
+
+        // 🔥 HAPUS FILTER - KIRIM SEMUA SLOT TERMASUK YANG LEWAT
+        // if ($isToday) {
+        //     $slots = $slots->filter(function($slot) use ($currentTime) {
+        //         return $slot->jam_mulai > $currentTime;
+        //     })->values();
+        // }
 
         return response()->json($slots);
     }
