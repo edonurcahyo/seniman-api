@@ -102,6 +102,41 @@ class ReservasiController extends Controller
             'catatan' => 'nullable|string'
         ]);
 
+        // 🔥 AMBIL DURASI LAYANAN
+        $layanan = DB::table('layanan')
+            ->where('id_layanan', $request->layanan_id)
+            ->first();
+        
+        if (!$layanan) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Layanan tidak ditemukan'
+            ], 404);
+        }
+        
+        // 🔥 HITUNG JUMLAH SLOT YANG DIBUTUHKAN (15 menit per slot)
+        $slotsNeeded = $this->getSlotsNeeded($layanan->durasi);
+        
+        // 🔥 AMBIL JADWAL_ID DARI SLOT YANG DIPILIH
+        $selectedSlot = DB::table('slot_waktu')
+            ->where('id_slot', $request->slot_id)
+            ->first();
+        
+        if (!$selectedSlot) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Slot tidak ditemukan'
+            ], 404);
+        }
+        
+        // 🔥 CEK KETERSEDIAAN SLOT
+        if (!$this->checkSlotsAvailability($selectedSlot->jadwal_id, $request->slot_id, $slotsNeeded)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Slot waktu yang dibutuhkan tidak tersedia. Silakan pilih waktu lain.'
+            ], 400);
+        }
+
         $kodeReservasi = 'RES-' . date('Ymd') . '-' . strtoupper(substr(uniqid(), -6));
         $status = $request->status_pembayaran === 'paid' ? 'dikonfirmasi' : 'pending';
 
@@ -120,17 +155,16 @@ class ReservasiController extends Controller
             'updated_at' => now()
         ]);
 
-        // Update slot status
-        DB::table('slot_waktu')
-            ->where('id_slot', $request->slot_id)
-            ->update(['status' => 'dibooking']);
+        // 🔥 BOOKING MULTIPLE SLOTS
+        $this->bookSlots($selectedSlot->jadwal_id, $request->slot_id, $slotsNeeded);
 
         return response()->json([
             'success' => true,
             'message' => 'Reservasi berhasil',
             'status' => $status,
             'id_reservasi' => $id,
-            'kode_reservasi' => $kodeReservasi
+            'kode_reservasi' => $kodeReservasi,
+            'slots_booked' => $slotsNeeded
         ]);
     }
 
@@ -145,7 +179,6 @@ class ReservasiController extends Controller
             ->where('tanggal', $tanggal)
             ->first();
 
-        // Jika jadwal tidak ditemukan, buat jadwal baru untuk tanggal tersebut
         if (!$jadwal) {
             $jadwalId = DB::table('jadwal')->insertGetId([
                 'tanggal' => $tanggal,
@@ -155,7 +188,7 @@ class ReservasiController extends Controller
             
             $jamMulai = 10;
             $jamSelesai = 22;
-            $menitPerSlot = 45;
+            $menitPerSlot = 15;
             
             $mulaiMenit = $jamMulai * 60;
             $selesaiMenit = $jamSelesai * 60;
@@ -169,11 +202,8 @@ class ReservasiController extends Controller
                 
                 $jamMulaiStr = sprintf('%02d:%02d:00', $jamMulaiSlot, $menitMulaiSlot);
                 
-                // 🔥 CEK APAKAH SLOT SUDAH LEWAT (UNTUK HARI INI)
+                // 🔥 JANGAN SET STATUS LEWAT DI SINI (biarkan tersedia)
                 $status = 'tersedia';
-                if ($isToday && $jamMulaiStr <= $currentTime) {
-                    $status = 'lewat';
-                }
                 
                 DB::table('slot_waktu')->insert([
                     'jadwal_id' => $jadwalId,
@@ -190,13 +220,21 @@ class ReservasiController extends Controller
             $slots = DB::table('slot_waktu')
                 ->where('jadwal_id', $jadwalId)
                 ->get();
+            
+            // 🔥 UPDATE STATUS LEWAT UNTUK HARI INI
+            if ($isToday) {
+                foreach ($slots as $slot) {
+                    if ($slot->jam_mulai <= $currentTime && $slot->status === 'tersedia') {
+                        DB::table('slot_waktu')
+                            ->where('id_slot', $slot->id_slot)
+                            ->update(['status' => 'lewat']);
+                    }
+                }
                 
-            // 🔥 HAPUS FILTER - KIRIM SEMUA SLOT TERMASUK YANG LEWAT
-            // if ($isToday) {
-            //     $slots = $slots->filter(function($slot) use ($currentTime) {
-            //         return $slot->jam_mulai > $currentTime;
-            //     })->values();
-            // }
+                $slots = DB::table('slot_waktu')
+                    ->where('jadwal_id', $jadwalId)
+                    ->get();
+            }
                 
             return response()->json($slots);
         }
@@ -206,7 +244,7 @@ class ReservasiController extends Controller
             ->where('jadwal_id', $jadwal->id_jadwal)
             ->get();
 
-        // 🔥 UPDATE STATUS SLOT YANG SUDAH LEWAT DI DATABASE (UNTUK HARI INI)
+        // 🔥 UPDATE STATUS LEWAT UNTUK HARI INI
         if ($isToday) {
             foreach ($slots as $slot) {
                 if ($slot->jam_mulai <= $currentTime && $slot->status === 'tersedia') {
@@ -216,20 +254,67 @@ class ReservasiController extends Controller
                 }
             }
             
-            // 🔥 AMBIL ULANG DATA SETELAH UPDATE
             $slots = DB::table('slot_waktu')
                 ->where('jadwal_id', $jadwal->id_jadwal)
                 ->get();
         }
 
-        // 🔥 HAPUS FILTER - KIRIM SEMUA SLOT TERMASUK YANG LEWAT
-        // if ($isToday) {
-        //     $slots = $slots->filter(function($slot) use ($currentTime) {
-        //         return $slot->jam_mulai > $currentTime;
-        //     })->values();
-        // }
-
         return response()->json($slots);
+    }
+
+    private function getSlotsNeeded($durasi)
+    {
+        // 🔥 Bulatkan ke atas ke kelipatan 15 menit terdekat
+        return ceil($durasi / 15);
+    }
+
+    /**
+     * Cek apakah slot yang dibutuhkan tersedia
+     */
+    private function checkSlotsAvailability($jadwalId, $startSlotId, $slotsNeeded)
+    {
+        // Ambil slot mulai dari startSlotId
+        $slots = DB::table('slot_waktu')
+            ->where('jadwal_id', $jadwalId)
+            ->where('id_slot', '>=', $startSlotId)
+            ->orderBy('id_slot', 'asc')
+            ->limit($slotsNeeded)
+            ->get();
+        
+        if ($slots->count() < $slotsNeeded) {
+            return false;
+        }
+        
+        // Cek apakah semua slot tersedia
+        foreach ($slots as $slot) {
+            if ($slot->status !== 'tersedia') {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
+    /**
+     * Booking multiple slots
+     */
+    private function bookSlots($jadwalId, $startSlotId, $slotsNeeded)
+    {
+        $slots = DB::table('slot_waktu')
+            ->where('jadwal_id', $jadwalId)
+            ->where('id_slot', '>=', $startSlotId)
+            ->orderBy('id_slot', 'asc')
+            ->limit($slotsNeeded)
+            ->get();
+        
+        foreach ($slots as $slot) {
+            DB::table('slot_waktu')
+                ->where('id_slot', $slot->id_slot)
+                ->update([
+                    'status' => 'dibooking',
+                    'updated_at' => now()
+                ]);
+        }
     }
 
     public function dashboardStats(Request $request)
@@ -378,9 +463,6 @@ class ReservasiController extends Controller
         ]);
     }
 
-    /**
-     * Batalkan reservasi
-     */
     public function cancel($id)
     {
         $reservasi = DB::table('reservasi')
@@ -394,19 +476,44 @@ class ReservasiController extends Controller
             ], 404);
         }
 
+        // 🔥 AMBIL DURASI LAYANAN
+        $layanan = DB::table('layanan')
+            ->where('id_layanan', $reservasi->layanan_id)
+            ->first();
+        
+        $slotsNeeded = $layanan ? $this->getSlotsNeeded($layanan->durasi) : 1;
+
+        // 🔥 KEMBALIKAN SEMUA SLOT KE TERSEDIA
+        if ($reservasi->slot_id) {
+            $startSlot = DB::table('slot_waktu')
+                ->where('id_slot', $reservasi->slot_id)
+                ->first();
+            
+            if ($startSlot) {
+                $slots = DB::table('slot_waktu')
+                    ->where('jadwal_id', $startSlot->jadwal_id)
+                    ->where('id_slot', '>=', $reservasi->slot_id)
+                    ->orderBy('id_slot', 'asc')
+                    ->limit($slotsNeeded)
+                    ->get();
+                
+                foreach ($slots as $slot) {
+                    DB::table('slot_waktu')
+                        ->where('id_slot', $slot->id_slot)
+                        ->update([
+                            'status' => 'tersedia',
+                            'updated_at' => now()
+                        ]);
+                }
+            }
+        }
+
         DB::table('reservasi')
             ->where('id_reservasi', $id)
             ->update([
                 'status' => 'dibatalkan',
                 'updated_at' => now()
             ]);
-
-        // Kembalikan slot ke tersedia
-        if ($reservasi->slot_id) {
-            DB::table('slot_waktu')
-                ->where('id_slot', $reservasi->slot_id)
-                ->update(['status' => 'tersedia']);
-        }
 
         return response()->json([
             'success' => true,
